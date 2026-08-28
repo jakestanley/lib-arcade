@@ -25,7 +25,7 @@ config = AdapterConfig.from_env(
     default_compose_project="arcade-palworld",
     default_compose_service="palworld",
     default_stop_timeout_seconds=30,
-    default_forward_protocol="udp",
+    default_forward_protocols=("udp",),
 )
 
 if __name__ == "__main__":

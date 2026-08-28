@@ -153,7 +153,8 @@ def run_adapter(config: AdapterConfig) -> None:
     print(f"Controlling {config.compose_project}/{config.compose_service} via the Docker socket")
     print(f"Registering with {config.arcade_base_url} every {config.heartbeat_seconds}s as '{config.server_id}'")
     if config.upnp_enabled:
-        print(f"UPnP port-forwarding enabled for {config.forward_protocol.upper()} {config.forward_port}")
+        protocols = "+".join(p.upper() for p in config.forward_protocols)
+        print(f"UPnP port-forwarding enabled for {protocols} {config.forward_port}")
     else:
         print("UPnP port-forwarding disabled (ARCADE_UPNP_ENABLED=false)")
     server.serve_forever()

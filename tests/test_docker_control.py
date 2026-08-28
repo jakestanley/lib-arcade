@@ -20,7 +20,7 @@ def make_config(**overrides) -> AdapterConfig:
         stop_timeout_seconds=30,
         upnp_enabled=False,
         forward_port=0,
-        forward_protocol="udp",
+        forward_protocols=("udp",),
     )
     defaults.update(overrides)
     return AdapterConfig(**defaults)
@@ -116,11 +116,25 @@ class SyncPortForwardTests(unittest.TestCase):
             mock_upnp.ensure_mapping.assert_not_called()
 
     def test_calls_ensure_mapping_when_enabled(self):
-        config = make_config(upnp_enabled=True, forward_port=8211, forward_protocol="udp")
+        config = make_config(upnp_enabled=True, forward_port=8211, forward_protocols=("udp",))
         with patch("lib_arcade.docker_control.upnp") as mock_upnp:
             docker_control.sync_port_forward(config, should_be_open=True)
             mock_upnp.ensure_mapping.assert_called_once_with(
                 8211, "udp", config.server_description, True
+            )
+
+    def test_calls_ensure_mapping_for_every_protocol(self):
+        config = make_config(
+            upnp_enabled=True, forward_port=27015, forward_protocols=("udp", "tcp")
+        )
+        with patch("lib_arcade.docker_control.upnp") as mock_upnp:
+            docker_control.sync_port_forward(config, should_be_open=True)
+            self.assertEqual(mock_upnp.ensure_mapping.call_count, 2)
+            mock_upnp.ensure_mapping.assert_any_call(
+                27015, "udp", config.server_description, True
+            )
+            mock_upnp.ensure_mapping.assert_any_call(
+                27015, "tcp", config.server_description, True
             )
 
 

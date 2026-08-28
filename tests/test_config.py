@@ -16,12 +16,12 @@ class ConfigFromEnvTests(unittest.TestCase):
                 default_compose_project="arcade-palworld",
                 default_compose_service="palworld",
                 default_stop_timeout_seconds=30,
-                default_forward_protocol="udp",
+                default_forward_protocols=("udp",),
             )
         self.assertEqual(config.server_id, "arcade-palworld")
         self.assertEqual(config.adapter_port, 8300)
         self.assertEqual(config.stop_timeout_seconds, 30)
-        self.assertEqual(config.forward_protocol, "udp")
+        self.assertEqual(config.forward_protocols, ("udp",))
         self.assertTrue(config.upnp_enabled)
         self.assertEqual(config.forward_port, 0)
 
@@ -42,13 +42,43 @@ class ConfigFromEnvTests(unittest.TestCase):
                 default_compose_project="arcade-minecraft",
                 default_compose_service="minecraft",
                 default_stop_timeout_seconds=70,
-                default_forward_protocol="tcp",
+                default_forward_protocols=("tcp",),
             )
         self.assertEqual(config.server_id, "custom-id")
         self.assertEqual(config.adapter_port, 9999)
         self.assertFalse(config.upnp_enabled)
         self.assertEqual(config.forward_port, 25565)
-        self.assertEqual(config.forward_protocol, "tcp")
+        self.assertEqual(config.forward_protocols, ("tcp",))
+
+    def test_multiple_forward_protocols(self):
+        env = {"ARCADE_FORWARD_PROTOCOL": "udp,tcp"}
+        with patch.dict(os.environ, env, clear=True):
+            config = AdapterConfig.from_env(
+                default_server_id="arcade-cs2",
+                default_server_name="CS2",
+                default_server_description="CS2 dedicated server (arcade-cs2)",
+                default_adapter_port=8302,
+                default_compose_project="arcade-cs2",
+                default_compose_service="cs2",
+                default_stop_timeout_seconds=30,
+                default_forward_protocols=("udp",),
+            )
+        self.assertEqual(config.forward_protocols, ("udp", "tcp"))
+
+    def test_forward_protocols_env_whitespace_and_case_tolerant(self):
+        env = {"ARCADE_FORWARD_PROTOCOL": " UDP , Tcp "}
+        with patch.dict(os.environ, env, clear=True):
+            config = AdapterConfig.from_env(
+                default_server_id="arcade-cs2",
+                default_server_name="CS2",
+                default_server_description="CS2 dedicated server (arcade-cs2)",
+                default_adapter_port=8302,
+                default_compose_project="arcade-cs2",
+                default_compose_service="cs2",
+                default_stop_timeout_seconds=30,
+                default_forward_protocols=("udp",),
+            )
+        self.assertEqual(config.forward_protocols, ("udp", "tcp"))
 
 
 if __name__ == "__main__":

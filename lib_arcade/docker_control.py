@@ -44,12 +44,13 @@ def find_target_container(config: AdapterConfig):
 def sync_port_forward(config: AdapterConfig, should_be_open: bool) -> None:
     if not config.upnp_enabled or not config.forward_port:
         return
-    upnp.ensure_mapping(
-        config.forward_port,
-        config.forward_protocol,
-        config.server_description,
-        should_be_open,
-    )
+    for protocol in config.forward_protocols:
+        upnp.ensure_mapping(
+            config.forward_port,
+            protocol,
+            config.server_description,
+            should_be_open,
+        )
 
 
 def current_status(config: AdapterConfig) -> str:

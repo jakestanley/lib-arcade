@@ -26,7 +26,7 @@ class AdapterConfig:
     stop_timeout_seconds: int
     upnp_enabled: bool
     forward_port: int
-    forward_protocol: str
+    forward_protocols: tuple[str, ...]
 
     @classmethod
     def from_env(
@@ -39,7 +39,7 @@ class AdapterConfig:
         default_compose_project: str,
         default_compose_service: str,
         default_stop_timeout_seconds: int,
-        default_forward_protocol: str,
+        default_forward_protocols: tuple[str, ...],
     ) -> "AdapterConfig":
         return cls(
             server_id=os.environ.get("ARCADE_SERVER_ID", default_server_id),
@@ -74,7 +74,15 @@ class AdapterConfig:
             upnp_enabled=os.environ.get("ARCADE_UPNP_ENABLED", "true").lower()
             == "true",
             forward_port=int(os.environ.get("SERVER_PORT", "0")),
-            forward_protocol=os.environ.get(
-                "ARCADE_FORWARD_PROTOCOL", default_forward_protocol
+            forward_protocols=_parse_protocols(
+                os.environ.get("ARCADE_FORWARD_PROTOCOL"), default_forward_protocols
             ),
         )
+
+
+def _parse_protocols(raw: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Comma-separated protocol list, e.g. "udp,tcp" -- most servers only
+    need one, but some (e.g. CS2) need both on the same port."""
+    if not raw:
+        return default
+    return tuple(p.strip().lower() for p in raw.split(",") if p.strip())
