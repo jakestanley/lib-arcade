@@ -1,0 +1,14 @@
+when:
+  - event: push
+    branch: main
+  - event: pull_request
+  - event: manual
+
+steps:
+  - name: test
+    image: python:3.13-slim
+    commands:
+      - apt-get update
+      - apt-get install -y --no-install-recommends build-essential libminiupnpc-dev
+      - pip install --no-cache-dir -e .
+      - python -m unittest discover -s tests -v

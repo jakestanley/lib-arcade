@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lib-arcade"
+version = "0.1.0"
+description = "Shared HTTP server, Docker control, and UPnP helper for arcade.stanley.arpa game-server adapters"
+requires-python = ">=3.11"
+dependencies = [
+    "docker>=7.0",
+    "miniupnpc>=2.2.7",
+]
+
+[tool.setuptools.packages.find]
+include = ["lib_arcade*"]
