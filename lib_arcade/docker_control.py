@@ -13,11 +13,23 @@ from docker.errors import DockerException, NotFound
 from . import upnp
 from .config import AdapterConfig
 
-docker_client = docker.from_env()
+# Lazy, not constructed at import time: docker.from_env() fails immediately
+# if there's no Docker socket reachable, which broke `import lib_arcade`
+# itself inside CI's sandboxed test container (no socket there, correctly)
+# -- caught by lib-arcade's own CI, not assumed.
+docker_client = None
+
+
+def _ensure_client():
+    global docker_client
+    if docker_client is None:
+        docker_client = docker.from_env()
+    return docker_client
 
 
 def find_target_container(config: AdapterConfig):
-    containers = docker_client.containers.list(
+    client = docker_client if docker_client is not None else _ensure_client()
+    containers = client.containers.list(
         all=True,
         filters={
             "label": [
