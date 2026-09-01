@@ -9,6 +9,7 @@ homelab-arcade) for the protocol this implements.
 
 from __future__ import annotations
 
+import inspect
 import json
 import socket
 import ssl
@@ -17,31 +18,70 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable
+from typing import Any, Callable, Union
 
 from .config import AdapterConfig
 from .docker_control import current_status, do_start, do_stop, sync_port_forward
 
-# Contract for an action handler: a zero-arg callable (closes over whatever
-# it needs itself) returning (ok, status_or_error) -- same shape do_start/
-# do_stop already return.
-ActionHandler = Callable[[], "tuple[bool, str]"]
+# Contract for an action handler: either a zero-arg callable (closes over
+# whatever it needs itself, e.g. do_start/do_stop/restart_round) or a
+# one-arg callable taking the parsed JSON request body as a dict (for an
+# action that needs input, e.g. apply_preset({"preset": "casual"})).
+# Either shape returns (ok, status_or_error).
+ActionHandler = Union[Callable[[], "tuple[bool, str]"], Callable[[dict], "tuple[bool, str]"]]
+
+# A "rich" extra_actions entry, for an action the portal should render an
+# input form for: {"handler": ..., "label": "Apply preset", "params": [...]}.
+# `params` follows the arcade contract's fixed param-type vocabulary
+# (enum/boolean/number/string) -- this library doesn't interpret it, only
+# passes it through into the advertised action shape.
+ActionSpec = dict[str, Any]
+
+StatsFn = Callable[[], "list[dict[str, str]]"]
+
+
+def _handler_accepts_body(handler: ActionHandler) -> bool:
+    try:
+        sig = inspect.signature(handler)
+    except (TypeError, ValueError):
+        return False
+    return len(sig.parameters) > 0
 
 
 def _merge_actions(
-    config: AdapterConfig, extra_actions: dict[str, ActionHandler] | None
-) -> tuple[list[str], dict[str, ActionHandler]]:
+    config: AdapterConfig,
+    extra_actions: dict[str, ActionHandler | ActionSpec] | None,
+) -> tuple[list[Union[str, dict]], dict[str, ActionHandler]]:
     """Build the full action_handlers dict (start/stop plus whatever a
     consumer adapter.py supplies) and the ordered actions list derived
     from it. Pulled out as a pure function so it's unit-testable without
     spinning up a real HTTP server.
+
+    An extra_actions value is either a bare callable (advertised as a plain
+    name, same as start/stop) or a dict shaped like
+    {"handler": callable, "label": ..., "params": [...]} for an action that
+    takes input -- advertised as the object form the arcade contract
+    defines for parameterized actions.
     """
     action_handlers: dict[str, ActionHandler] = {
         "start": lambda: do_start(config),
         "stop": lambda: do_stop(config),
     }
-    action_handlers.update(extra_actions or {})
-    return list(action_handlers), action_handlers
+    action_specs: dict[str, ActionSpec] = {}
+    for name, entry in (extra_actions or {}).items():
+        if isinstance(entry, dict):
+            action_handlers[name] = entry["handler"]
+            spec = {k: v for k, v in entry.items() if k != "handler"}
+            if spec:
+                action_specs[name] = spec
+        else:
+            action_handlers[name] = entry
+
+    actions: list[Union[str, dict]] = [
+        {"name": name, **action_specs[name]} if name in action_specs else name
+        for name in action_handlers
+    ]
+    return actions, action_handlers
 
 
 def detect_primary_ip() -> str:
@@ -67,8 +107,9 @@ def adapter_base_url(config: AdapterConfig) -> str:
 def _build_handler(
     config: AdapterConfig,
     ssl_context: ssl.SSLContext | None,
-    actions: list[str],
+    actions: list[Union[str, dict]],
     action_handlers: dict[str, ActionHandler],
+    stats_fn: StatsFn | None,
 ):
     class AdapterHandler(BaseHTTPRequestHandler):
         def _send_json(self, status: int, payload: dict) -> None:
@@ -81,6 +122,7 @@ def _build_handler(
 
         def do_GET(self) -> None:
             if self.path.rstrip("/") == "/arcade/info":
+                status = current_status(config)
                 self._send_json(
                     200,
                     {
@@ -88,7 +130,8 @@ def _build_handler(
                         "name": config.server_name,
                         "description": config.server_description,
                         "actions": actions,
-                        "status": current_status(config),
+                        "stats": _safe_stats(stats_fn) if status == "running" else [],
+                        "status": status,
                     },
                 )
                 return
@@ -103,7 +146,14 @@ def _build_handler(
                 if handler is None:
                     self._send_json(404, {"ok": False, "error": f"unknown action: {action}"})
                     return
-                ok, status_or_error = handler()
+                content_length = int(self.headers.get("Content-Length", 0) or 0)
+                raw_body = self.rfile.read(content_length) if content_length else b""
+                try:
+                    body = json.loads(raw_body) if raw_body else {}
+                except json.JSONDecodeError:
+                    self._send_json(400, {"ok": False, "error": "invalid JSON body"})
+                    return
+                ok, status_or_error = handler(body) if _handler_accepts_body(handler) else handler()
                 if ok:
                     self._send_json(200, {"ok": True, "status": status_or_error})
                 else:
@@ -117,8 +167,24 @@ def _build_handler(
     return AdapterHandler
 
 
+def _safe_stats(stats_fn: StatsFn | None) -> list[dict[str, str]]:
+    """Never let a stats-collection error (e.g. RCON unreachable while the
+    game is mid-boot) take down the info endpoint or heartbeat loop --
+    stats are best-effort, unlike status."""
+    if stats_fn is None:
+        return []
+    try:
+        return stats_fn() or []
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad, see above
+        print(f"[adapter] stats_fn failed: {exc}")
+        return []
+
+
 def _heartbeat_loop(
-    config: AdapterConfig, ssl_context: ssl.SSLContext | None, actions: list[str]
+    config: AdapterConfig,
+    ssl_context: ssl.SSLContext | None,
+    actions: list[Union[str, dict]],
+    stats_fn: StatsFn | None,
 ) -> None:
     register_url = f"{config.arcade_base_url}/api/register"
     base_url = adapter_base_url(config)
@@ -135,6 +201,7 @@ def _heartbeat_loop(
             "description": config.server_description,
             "base_url": base_url,
             "actions": actions,
+            "stats": _safe_stats(stats_fn) if status == "running" else [],
             "status": status,
         }
         data = json.dumps(payload).encode("utf-8")
@@ -153,7 +220,9 @@ def _heartbeat_loop(
 
 
 def run_adapter(
-    config: AdapterConfig, extra_actions: dict[str, ActionHandler] | None = None
+    config: AdapterConfig,
+    extra_actions: dict[str, ActionHandler | ActionSpec] | None = None,
+    stats_fn: StatsFn | None = None,
 ) -> None:
     # Internal HTTPS uses the homelab's private CA (see homelab-standards'
     # internal-ca-trust.md) -- never disable verification instead.
@@ -172,10 +241,10 @@ def run_adapter(
     sync_port_forward(config, should_be_open=current_status(config) == "running")
 
     threading.Thread(
-        target=_heartbeat_loop, args=(config, ssl_context, actions), daemon=True
+        target=_heartbeat_loop, args=(config, ssl_context, actions, stats_fn), daemon=True
     ).start()
 
-    handler = _build_handler(config, ssl_context, actions, action_handlers)
+    handler = _build_handler(config, ssl_context, actions, action_handlers, stats_fn)
     server = ThreadingHTTPServer(("0.0.0.0", config.adapter_port), handler)
     print(f"{config.server_name} arcade adapter listening on http://0.0.0.0:{config.adapter_port}")
     print(f"Controlling {config.compose_project}/{config.compose_service} via the Docker socket")
