@@ -17,11 +17,31 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Callable
 
 from .config import AdapterConfig
 from .docker_control import current_status, do_start, do_stop, sync_port_forward
 
-ACTIONS = ["start", "stop"]
+# Contract for an action handler: a zero-arg callable (closes over whatever
+# it needs itself) returning (ok, status_or_error) -- same shape do_start/
+# do_stop already return.
+ActionHandler = Callable[[], "tuple[bool, str]"]
+
+
+def _merge_actions(
+    config: AdapterConfig, extra_actions: dict[str, ActionHandler] | None
+) -> tuple[list[str], dict[str, ActionHandler]]:
+    """Build the full action_handlers dict (start/stop plus whatever a
+    consumer adapter.py supplies) and the ordered actions list derived
+    from it. Pulled out as a pure function so it's unit-testable without
+    spinning up a real HTTP server.
+    """
+    action_handlers: dict[str, ActionHandler] = {
+        "start": lambda: do_start(config),
+        "stop": lambda: do_stop(config),
+    }
+    action_handlers.update(extra_actions or {})
+    return list(action_handlers), action_handlers
 
 
 def detect_primary_ip() -> str:
@@ -44,12 +64,12 @@ def adapter_base_url(config: AdapterConfig) -> str:
     return f"http://{detect_primary_ip()}:{config.adapter_port}"
 
 
-def _build_handler(config: AdapterConfig, ssl_context: ssl.SSLContext | None):
-    action_handlers = {
-        "start": lambda: do_start(config),
-        "stop": lambda: do_stop(config),
-    }
-
+def _build_handler(
+    config: AdapterConfig,
+    ssl_context: ssl.SSLContext | None,
+    actions: list[str],
+    action_handlers: dict[str, ActionHandler],
+):
     class AdapterHandler(BaseHTTPRequestHandler):
         def _send_json(self, status: int, payload: dict) -> None:
             body = json.dumps(payload).encode("utf-8")
@@ -67,7 +87,7 @@ def _build_handler(config: AdapterConfig, ssl_context: ssl.SSLContext | None):
                         "id": config.server_id,
                         "name": config.server_name,
                         "description": config.server_description,
-                        "actions": ACTIONS,
+                        "actions": actions,
                         "status": current_status(config),
                     },
                 )
@@ -97,7 +117,9 @@ def _build_handler(config: AdapterConfig, ssl_context: ssl.SSLContext | None):
     return AdapterHandler
 
 
-def _heartbeat_loop(config: AdapterConfig, ssl_context: ssl.SSLContext | None) -> None:
+def _heartbeat_loop(
+    config: AdapterConfig, ssl_context: ssl.SSLContext | None, actions: list[str]
+) -> None:
     register_url = f"{config.arcade_base_url}/api/register"
     base_url = adapter_base_url(config)
     while True:
@@ -112,7 +134,7 @@ def _heartbeat_loop(config: AdapterConfig, ssl_context: ssl.SSLContext | None) -
             "name": config.server_name,
             "description": config.server_description,
             "base_url": base_url,
-            "actions": ACTIONS,
+            "actions": actions,
             "status": status,
         }
         data = json.dumps(payload).encode("utf-8")
@@ -130,7 +152,9 @@ def _heartbeat_loop(config: AdapterConfig, ssl_context: ssl.SSLContext | None) -
         time.sleep(config.heartbeat_seconds)
 
 
-def run_adapter(config: AdapterConfig) -> None:
+def run_adapter(
+    config: AdapterConfig, extra_actions: dict[str, ActionHandler] | None = None
+) -> None:
     # Internal HTTPS uses the homelab's private CA (see homelab-standards'
     # internal-ca-trust.md) -- never disable verification instead.
     import os
@@ -139,15 +163,19 @@ def run_adapter(config: AdapterConfig) -> None:
     if os.path.isfile(config.homelab_ca_file):
         ssl_context = ssl.create_default_context(cafile=config.homelab_ca_file)
 
+    actions, action_handlers = _merge_actions(config, extra_actions)
+
     # Reconcile immediately on boot -- an adapter restart while the game
     # server is already running (or already stopped) shouldn't have to
     # wait for a future start/stop action or the next heartbeat to get the
     # port-forward state right.
     sync_port_forward(config, should_be_open=current_status(config) == "running")
 
-    threading.Thread(target=_heartbeat_loop, args=(config, ssl_context), daemon=True).start()
+    threading.Thread(
+        target=_heartbeat_loop, args=(config, ssl_context, actions), daemon=True
+    ).start()
 
-    handler = _build_handler(config, ssl_context)
+    handler = _build_handler(config, ssl_context, actions, action_handlers)
     server = ThreadingHTTPServer(("0.0.0.0", config.adapter_port), handler)
     print(f"{config.server_name} arcade adapter listening on http://0.0.0.0:{config.adapter_port}")
     print(f"Controlling {config.compose_project}/{config.compose_service} via the Docker socket")

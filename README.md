@@ -32,6 +32,28 @@ if __name__ == "__main__":
     run_adapter(config)
 ```
 
+`run_adapter` always provides `start`/`stop`. A consumer can add its own
+named actions on top by passing `extra_actions` — a dict of zero-arg
+handlers following the same `(ok, status_or_error)` contract `do_start`/
+`do_stop` already return (a handler closes over whatever it needs itself,
+e.g. an RCON client or `config`):
+
+```python
+def restart_round():
+    ...
+    return True, "restarting"
+
+run_adapter(config, extra_actions={"restart_round": restart_round})
+```
+
+No portal or frontend changes are needed to pick up a new action — both
+already render/proxy generically over whatever `actions` a server
+registers with. `do_exec(config, command)` is also exported for the common
+case of running a command inside the sibling game-server container (e.g.
+invoking an image's own backup script) — generic Docker plumbing, same
+category as `do_start`/`do_stop`; anything more specific (RCON, a game's
+own HTTP API, etc.) belongs in the consumer repo, not here.
+
 Installed as a git dependency tracking `main` directly (no version
 pinning/bump mechanism — consumers rebuild periodically to pick up
 changes). Public repo, so this needs no credentials at all:

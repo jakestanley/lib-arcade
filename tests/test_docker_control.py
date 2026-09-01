@@ -102,6 +102,34 @@ class DoStartStopTests(unittest.TestCase):
             container.stop.assert_called_once_with(timeout=70)
 
 
+class DoExecTests(unittest.TestCase):
+    def test_fails_when_no_container(self):
+        config = make_config()
+        with patch.object(docker_control, "find_target_container", return_value=None):
+            ok, message = docker_control.do_exec(config, "echo hi")
+            self.assertFalse(ok)
+            self.assertIn("no container found", message)
+
+    def test_runs_command_and_returns_ok_on_zero_exit(self):
+        config = make_config()
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"done\n")
+        with patch.object(docker_control, "find_target_container", return_value=container):
+            ok, status = docker_control.do_exec(config, "bash /usr/local/bin/backup")
+            self.assertTrue(ok)
+            self.assertEqual(status, "ok")
+            container.exec_run.assert_called_once_with("bash /usr/local/bin/backup")
+
+    def test_returns_output_as_error_on_nonzero_exit(self):
+        config = make_config()
+        container = MagicMock()
+        container.exec_run.return_value = (1, b"boom\n")
+        with patch.object(docker_control, "find_target_container", return_value=container):
+            ok, message = docker_control.do_exec(config, "false")
+            self.assertFalse(ok)
+            self.assertEqual(message, "boom\n")
+
+
 class SyncPortForwardTests(unittest.TestCase):
     def test_noop_when_upnp_disabled(self):
         config = make_config(upnp_enabled=False, forward_port=8211)

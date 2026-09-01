@@ -79,6 +79,25 @@ def do_start(config: AdapterConfig) -> tuple[bool, str]:
     return True, current_status(config)
 
 
+def do_exec(config: AdapterConfig, command: str) -> tuple[bool, str]:
+    """Run a command inside the sibling game-server container.
+
+    Generic Docker plumbing, same category as do_start/do_stop -- what
+    command to actually run (RCON client, backup script, etc.) is entirely
+    up to the caller.
+    """
+    try:
+        container = find_target_container(config)
+        if container is None:
+            return False, f"no container found for {config.compose_project}/{config.compose_service}"
+        exit_code, output = container.exec_run(command)
+    except (DockerException, NotFound) as exc:
+        return False, str(exc)
+    if exit_code != 0:
+        return False, output.decode(errors="replace") if isinstance(output, bytes) else str(output)
+    return True, "ok"
+
+
 def do_stop(config: AdapterConfig) -> tuple[bool, str]:
     try:
         container = find_target_container(config)
