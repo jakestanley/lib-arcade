@@ -62,6 +62,34 @@ changes). Public repo, so this needs no credentials at all:
 lib-arcade @ git+https://github.com/jakestanley/lib-arcade.git@main
 ```
 
+## Gotchas
+
+These apply to every consumer (`arcade-palworld`, `arcade-minecraft`,
+`arcade-cs2`, ...) since they're properties of this library, not of any one
+game server. Consumer READMEs should link here rather than restate them.
+
+- **Adapters are unauthenticated and have `docker.sock` mounted in** —
+  root-equivalent host access, scoped to their own container, but trusting
+  the homelab LAN/VPN with no auth of its own (same trust model as RCON).
+  This is a single shared trust boundary across every consumer repo:
+  whichever adapter is reachable and compromised gets host-level Docker
+  control, not just its own game server's container. Don't expose
+  `ARCADE_ADAPTER_PORT` outside the LAN. Standard pattern for control
+  agents (Portainer, Watchtower use the same approach), but worth knowing
+  before scoping this pattern to anything less trusted than a home LAN.
+- **Tracks `main` directly, unpinned** (see Usage above) — there's no
+  version-pinning or bump mechanism, so a consumer's next rebuild can
+  silently pick up behavior changes with no record of which commit
+  actually shipped. Consumers also have to work around Docker's build
+  cache: since the `@main` pin in `requirements.txt` never changes, its
+  content never invalidates the `pip install` layer, so a plain
+  `docker compose up -d --build` won't pick up new commits on its own —
+  each consumer needs its own `CACHEBUST` build arg to force that layer to
+  actually re-run. Cheap for a single-maintainer homelab's iteration
+  speed, but not reproducible: there's no way to know which `lib-arcade`
+  commit a running adapter was built against without checking the image's
+  build time.
+
 ## Development
 
 ```bash
