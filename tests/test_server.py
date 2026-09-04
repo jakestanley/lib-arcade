@@ -20,23 +20,24 @@ def make_config(**overrides) -> AdapterConfig:
         upnp_enabled=False,
         forward_port=0,
         forward_protocols=("udp",),
+        update_check_seconds=1800.0,
     )
     defaults.update(overrides)
     return AdapterConfig(**defaults)
 
 
 class MergeActionsTests(unittest.TestCase):
-    def test_defaults_to_start_stop_only(self):
+    def test_defaults_to_start_stop_update(self):
         config = make_config()
         actions, handlers = _merge_actions(config, None)
-        self.assertEqual(actions, ["start", "stop"])
-        self.assertEqual(set(handlers), {"start", "stop"})
+        self.assertEqual(actions, ["start", "stop", "update"])
+        self.assertEqual(set(handlers), {"start", "stop", "update"})
 
-    def test_extra_actions_are_appended_after_start_stop(self):
+    def test_extra_actions_are_appended_after_start_stop_update(self):
         config = make_config()
         extra = {"restart_round": lambda: (True, "restarted")}
         actions, handlers = _merge_actions(config, extra)
-        self.assertEqual(actions, ["start", "stop", "restart_round"])
+        self.assertEqual(actions, ["start", "stop", "update", "restart_round"])
         self.assertIn("restart_round", handlers)
 
     def test_extra_action_handler_is_called_through(self):
@@ -54,7 +55,7 @@ class MergeActionsTests(unittest.TestCase):
             "restart_round": lambda: (True, "ok"),
         }
         actions, _ = _merge_actions(config, extra)
-        self.assertEqual(actions, ["start", "stop", "kick_bots", "restart_round"])
+        self.assertEqual(actions, ["start", "stop", "update", "kick_bots", "restart_round"])
 
     def test_rich_extra_action_is_advertised_as_object(self):
         config = make_config()
@@ -79,6 +80,7 @@ class MergeActionsTests(unittest.TestCase):
             [
                 "start",
                 "stop",
+                "update",
                 {
                     "name": "apply_preset",
                     "label": "Apply preset",
@@ -107,7 +109,13 @@ class MergeActionsTests(unittest.TestCase):
         actions, _ = _merge_actions(config, extra)
         self.assertEqual(
             actions,
-            ["start", "stop", "restart_round", {"name": "apply_preset", "label": "Apply preset"}],
+            [
+                "start",
+                "stop",
+                "update",
+                "restart_round",
+                {"name": "apply_preset", "label": "Apply preset"},
+            ],
         )
 
 

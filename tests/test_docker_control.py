@@ -21,6 +21,7 @@ def make_config(**overrides) -> AdapterConfig:
         upnp_enabled=False,
         forward_port=0,
         forward_protocols=("udp",),
+        update_check_seconds=1800.0,
     )
     defaults.update(overrides)
     return AdapterConfig(**defaults)
@@ -128,6 +129,141 @@ class DoExecTests(unittest.TestCase):
             ok, message = docker_control.do_exec(config, "false")
             self.assertFalse(ok)
             self.assertEqual(message, "boom\n")
+
+
+class CheckForUpdateTests(unittest.TestCase):
+    def test_false_when_no_container(self):
+        config = make_config()
+        with patch.object(docker_control, "find_target_container", return_value=None):
+            self.assertFalse(docker_control.check_for_update(config))
+
+    def test_true_when_pulled_image_differs(self):
+        config = make_config()
+        container = MagicMock()
+        container.attrs = {"Config": {"Image": "joedwards32/cs2:latest"}}
+        container.image.id = "sha256:old"
+        pulled = MagicMock(id="sha256:new")
+        with patch.object(docker_control, "find_target_container", return_value=container), \
+             patch.object(docker_control, "docker_client") as mock_client:
+            mock_client.images.pull.return_value = pulled
+            self.assertTrue(docker_control.check_for_update(config))
+            mock_client.images.pull.assert_called_once_with("joedwards32/cs2", tag="latest")
+
+    def test_false_when_pulled_image_matches(self):
+        config = make_config()
+        container = MagicMock()
+        container.attrs = {"Config": {"Image": "joedwards32/cs2:latest"}}
+        container.image.id = "sha256:same"
+        pulled = MagicMock(id="sha256:same")
+        with patch.object(docker_control, "find_target_container", return_value=container), \
+             patch.object(docker_control, "docker_client") as mock_client:
+            mock_client.images.pull.return_value = pulled
+            self.assertFalse(docker_control.check_for_update(config))
+
+    def test_false_on_docker_error(self):
+        config = make_config()
+        with patch.object(
+            docker_control, "find_target_container", side_effect=docker_control.DockerException("boom")
+        ):
+            self.assertFalse(docker_control.check_for_update(config))
+
+
+class DoUpdateTests(unittest.TestCase):
+    def test_fails_when_no_container(self):
+        config = make_config()
+        with patch.object(docker_control, "find_target_container", return_value=None):
+            ok, message = docker_control.do_update(config)
+            self.assertFalse(ok)
+            self.assertIn("no container found", message)
+
+    def test_already_up_to_date_does_not_recreate(self):
+        config = make_config()
+        container = MagicMock()
+        container.attrs = {"Config": {"Image": "joedwards32/cs2:latest"}}
+        container.image.id = "sha256:same"
+        pulled = MagicMock(id="sha256:same")
+        with patch.object(docker_control, "find_target_container", return_value=container), \
+             patch.object(docker_control, "docker_client") as mock_client:
+            mock_client.images.pull.return_value = pulled
+            ok, message = docker_control.do_update(config)
+            self.assertTrue(ok)
+            self.assertEqual(message, "already up to date")
+            container.remove.assert_not_called()
+
+    def test_recreates_and_restarts_when_running(self):
+        config = make_config()
+        container = MagicMock()
+        container.status = "running"
+        container.attrs = {
+            "Config": {
+                "Image": "joedwards32/cs2:latest",
+                "Env": ["FOO=bar"],
+                "Labels": {"l": "v"},
+                "Entrypoint": None,
+                "Cmd": None,
+            },
+            "HostConfig": {"NetworkMode": "host"},
+            "Name": "/arcade-cs2-cs2-1",
+        }
+        container.image.id = "sha256:old"
+        pulled = MagicMock(id="sha256:new")
+        with patch.object(docker_control, "find_target_container", return_value=container), \
+             patch.object(docker_control, "docker_client") as mock_client, \
+             patch.object(docker_control, "sync_port_forward") as mock_sync:
+            mock_client.images.pull.return_value = pulled
+            mock_client.api.create_container.return_value = {"Id": "newid"}
+            ok, message = docker_control.do_update(config)
+            self.assertTrue(ok)
+            container.remove.assert_called_once_with(force=True)
+            mock_client.api.create_container.assert_called_once_with(
+                image="sha256:new",
+                name="arcade-cs2-cs2-1",
+                environment=["FOO=bar"],
+                labels={"l": "v"},
+                entrypoint=None,
+                command=None,
+                host_config={"NetworkMode": "host"},
+            )
+            mock_client.api.start.assert_called_once_with("newid")
+            mock_sync.assert_called_once_with(config, should_be_open=True)
+            self.assertIn("restarted", message)
+
+    def test_recreates_but_leaves_stopped_container_stopped(self):
+        config = make_config()
+        container = MagicMock()
+        container.status = "exited"
+        container.attrs = {
+            "Config": {
+                "Image": "joedwards32/cs2:latest",
+                "Env": [],
+                "Labels": {},
+                "Entrypoint": None,
+                "Cmd": None,
+            },
+            "HostConfig": {},
+            "Name": "/arcade-cs2-cs2-1",
+        }
+        container.image.id = "sha256:old"
+        pulled = MagicMock(id="sha256:new")
+        with patch.object(docker_control, "find_target_container", return_value=container), \
+             patch.object(docker_control, "docker_client") as mock_client, \
+             patch.object(docker_control, "sync_port_forward") as mock_sync:
+            mock_client.images.pull.return_value = pulled
+            mock_client.api.create_container.return_value = {"Id": "newid"}
+            ok, message = docker_control.do_update(config)
+            self.assertTrue(ok)
+            mock_client.api.start.assert_not_called()
+            mock_sync.assert_called_once_with(config, should_be_open=False)
+            self.assertIn("left stopped", message)
+
+    def test_error_returns_false_and_message(self):
+        config = make_config()
+        with patch.object(
+            docker_control, "find_target_container", side_effect=docker_control.DockerException("boom")
+        ):
+            ok, message = docker_control.do_update(config)
+            self.assertFalse(ok)
+            self.assertEqual(message, "boom")
 
 
 class SyncPortForwardTests(unittest.TestCase):

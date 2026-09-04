@@ -27,6 +27,7 @@ class AdapterConfig:
     upnp_enabled: bool
     forward_port: int
     forward_protocols: tuple[str, ...]
+    update_check_seconds: float
 
     @classmethod
     def from_env(
@@ -76,6 +77,15 @@ class AdapterConfig:
             forward_port=int(os.environ.get("SERVER_PORT", "0")),
             forward_protocols=_parse_protocols(
                 os.environ.get("ARCADE_FORWARD_PROTOCOL"), default_forward_protocols
+            ),
+            # How often the heartbeat loop checks for a newer image of the
+            # target container -- deliberately decoupled from
+            # heartbeat_seconds (checking on every heartbeat would mean a
+            # registry pull every 30s by default, which is needlessly
+            # chatty). Applying an update found this way is never
+            # automatic -- see docker_control.do_update.
+            update_check_seconds=float(
+                os.environ.get("ARCADE_UPDATE_CHECK_SECONDS", "1800")
             ),
         )
 

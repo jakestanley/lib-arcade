@@ -21,7 +21,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Union
 
 from .config import AdapterConfig
-from .docker_control import current_status, do_start, do_stop, sync_port_forward
+from .docker_control import (
+    check_for_update,
+    current_status,
+    do_start,
+    do_stop,
+    do_update,
+    sync_port_forward,
+)
 
 # Contract for an action handler: either a zero-arg callable (closes over
 # whatever it needs itself, e.g. do_start/do_stop/restart_round) or a
@@ -66,6 +73,15 @@ def _merge_actions(
     action_handlers: dict[str, ActionHandler] = {
         "start": lambda: do_start(config),
         "stop": lambda: do_stop(config),
+        # Baseline like start/stop, not opt-in -- every adapter's target
+        # container is deployed from *some* image tag it doesn't fully
+        # control the freshness of, so checking/applying an update is
+        # always meaningful even where it's rarely used (e.g. a pinned
+        # Minecraft version). Never applied automatically -- see
+        # docker_control.do_update and the update_available heartbeat
+        # field below, which only ever reports what's true, never acts on
+        # it by itself.
+        "update": lambda: do_update(config),
     }
     action_specs: dict[str, ActionSpec] = {}
     for name, entry in (extra_actions or {}).items():
@@ -110,6 +126,7 @@ def _build_handler(
     actions: list[Union[str, dict]],
     action_handlers: dict[str, ActionHandler],
     stats_fn: StatsFn | None,
+    update_state: dict[str, bool],
 ):
     class AdapterHandler(BaseHTTPRequestHandler):
         def _send_json(self, status: int, payload: dict) -> None:
@@ -132,6 +149,7 @@ def _build_handler(
                         "actions": actions,
                         "stats": _safe_stats(stats_fn) if status == "running" else [],
                         "status": status,
+                        "update_available": update_state["available"],
                     },
                 )
                 return
@@ -185,9 +203,15 @@ def _heartbeat_loop(
     ssl_context: ssl.SSLContext | None,
     actions: list[Union[str, dict]],
     stats_fn: StatsFn | None,
+    update_state: dict[str, bool],
 ) -> None:
     register_url = f"{config.arcade_base_url}/api/register"
     base_url = adapter_base_url(config)
+    # 0.0 forces a check on the very first iteration (monotonic() is always
+    # far larger), so /arcade/info has a real answer from the first
+    # heartbeat rather than reporting stale "no" until the first interval
+    # elapses.
+    last_update_check = 0.0
     while True:
         status = current_status(config)
         # Renew the UPnP lease while running -- some routers expire mappings
@@ -195,6 +219,13 @@ def _heartbeat_loop(
         # rather than needing a manual stop/start.
         if status == "running":
             sync_port_forward(config, should_be_open=True)
+        now = time.monotonic()
+        if now - last_update_check >= config.update_check_seconds:
+            # Deliberately decoupled from heartbeat_seconds -- see
+            # AdapterConfig.update_check_seconds. Read-only (a docker pull),
+            # safe regardless of status; never applies anything itself.
+            update_state["available"] = check_for_update(config)
+            last_update_check = now
         payload = {
             "id": config.server_id,
             "name": config.server_name,
@@ -203,6 +234,7 @@ def _heartbeat_loop(
             "actions": actions,
             "stats": _safe_stats(stats_fn) if status == "running" else [],
             "status": status,
+            "update_available": update_state["available"],
         }
         data = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
@@ -233,6 +265,10 @@ def run_adapter(
         ssl_context = ssl.create_default_context(cafile=config.homelab_ca_file)
 
     actions, action_handlers = _merge_actions(config, extra_actions)
+    # Shared with the heartbeat loop, which is the only writer -- a plain
+    # dict is enough (no lock needed) since CPython's GIL makes a single
+    # key assignment atomic and this is the only kind of write it does.
+    update_state: dict[str, bool] = {"available": False}
 
     # Reconcile immediately on boot -- an adapter restart while the game
     # server is already running (or already stopped) shouldn't have to
@@ -241,10 +277,12 @@ def run_adapter(
     sync_port_forward(config, should_be_open=current_status(config) == "running")
 
     threading.Thread(
-        target=_heartbeat_loop, args=(config, ssl_context, actions, stats_fn), daemon=True
+        target=_heartbeat_loop,
+        args=(config, ssl_context, actions, stats_fn, update_state),
+        daemon=True,
     ).start()
 
-    handler = _build_handler(config, ssl_context, actions, action_handlers, stats_fn)
+    handler = _build_handler(config, ssl_context, actions, action_handlers, stats_fn, update_state)
     server = ThreadingHTTPServer(("0.0.0.0", config.adapter_port), handler)
     print(f"{config.server_name} arcade adapter listening on http://0.0.0.0:{config.adapter_port}")
     print(f"Controlling {config.compose_project}/{config.compose_service} via the Docker socket")

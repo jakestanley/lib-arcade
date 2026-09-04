@@ -24,6 +24,7 @@ class ConfigFromEnvTests(unittest.TestCase):
         self.assertEqual(config.forward_protocols, ("udp",))
         self.assertTrue(config.upnp_enabled)
         self.assertEqual(config.forward_port, 0)
+        self.assertEqual(config.update_check_seconds, 1800.0)
 
     def test_env_overrides_defaults(self):
         env = {
@@ -32,6 +33,7 @@ class ConfigFromEnvTests(unittest.TestCase):
             "ARCADE_UPNP_ENABLED": "false",
             "SERVER_PORT": "25565",
             "ARCADE_FORWARD_PROTOCOL": "tcp",
+            "ARCADE_UPDATE_CHECK_SECONDS": "300",
         }
         with patch.dict(os.environ, env, clear=True):
             config = AdapterConfig.from_env(
@@ -49,6 +51,7 @@ class ConfigFromEnvTests(unittest.TestCase):
         self.assertFalse(config.upnp_enabled)
         self.assertEqual(config.forward_port, 25565)
         self.assertEqual(config.forward_protocols, ("tcp",))
+        self.assertEqual(config.update_check_seconds, 300.0)
 
     def test_multiple_forward_protocols(self):
         env = {"ARCADE_FORWARD_PROTOCOL": "udp,tcp"}
