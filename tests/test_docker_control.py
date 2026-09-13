@@ -22,6 +22,8 @@ def make_config(**overrides) -> AdapterConfig:
         forward_port=0,
         forward_protocols=("udp",),
         update_check_seconds=1800.0,
+        idle_shutdown_enabled=False,
+        idle_shutdown_minutes=30.0,
     )
     defaults.update(overrides)
     return AdapterConfig(**defaults)
