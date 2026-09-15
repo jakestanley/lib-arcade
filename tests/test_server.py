@@ -1,7 +1,12 @@
 import unittest
 
 from lib_arcade.config import AdapterConfig
-from lib_arcade.server import _handler_accepts_body, _merge_actions, _safe_stats
+from lib_arcade.server import (
+    _evaluate_idle_shutdown,
+    _handler_accepts_body,
+    _merge_actions,
+    _safe_stats,
+)
 
 
 def make_config(**overrides) -> AdapterConfig:
@@ -21,6 +26,8 @@ def make_config(**overrides) -> AdapterConfig:
         forward_port=0,
         forward_protocols=("udp",),
         update_check_seconds=1800.0,
+        idle_shutdown_enabled=False,
+        idle_shutdown_minutes=30.0,
     )
     defaults.update(overrides)
     return AdapterConfig(**defaults)
@@ -140,6 +147,69 @@ class SafeStatsTests(unittest.TestCase):
             raise RuntimeError("rcon unreachable")
 
         self.assertEqual(_safe_stats(boom), [])
+
+
+class EvaluateIdleShutdownTests(unittest.TestCase):
+    def test_positive_count_resets_timer(self):
+        last_active, should_stop = _evaluate_idle_shutdown(
+            last_active=100.0,
+            now=2000.0,
+            became_active=False,
+            player_count=3,
+            idle_shutdown_minutes=30.0,
+        )
+        self.assertEqual(last_active, 2000.0)
+        self.assertFalse(should_stop)
+
+    def test_zero_count_under_threshold_does_not_stop(self):
+        # 10 minutes elapsed, threshold is 30 -- not idle long enough yet.
+        last_active, should_stop = _evaluate_idle_shutdown(
+            last_active=1000.0,
+            now=1000.0 + 10 * 60,
+            became_active=False,
+            player_count=0,
+            idle_shutdown_minutes=30.0,
+        )
+        self.assertEqual(last_active, 1000.0)
+        self.assertFalse(should_stop)
+
+    def test_zero_count_over_threshold_stops(self):
+        # 31 minutes elapsed, threshold is 30 -- idle long enough.
+        last_active, should_stop = _evaluate_idle_shutdown(
+            last_active=1000.0,
+            now=1000.0 + 31 * 60,
+            became_active=False,
+            player_count=0,
+            idle_shutdown_minutes=30.0,
+        )
+        self.assertEqual(last_active, 1000.0 + 31 * 60)
+        self.assertTrue(should_stop)
+
+    def test_none_count_never_stops_regardless_of_elapsed_time(self):
+        # A huge elapsed time would trigger a stop for count==0, but None
+        # means "inconclusive" and must never be treated as zero players.
+        last_active, should_stop = _evaluate_idle_shutdown(
+            last_active=0.0,
+            now=1_000_000.0,
+            became_active=False,
+            player_count=None,
+            idle_shutdown_minutes=30.0,
+        )
+        self.assertEqual(last_active, 1_000_000.0)
+        self.assertFalse(should_stop)
+
+    def test_status_transition_into_running_resets_timer(self):
+        # Even with a stale last_active and a zero count that would
+        # otherwise be well over threshold, a fresh boot resets the clock.
+        last_active, should_stop = _evaluate_idle_shutdown(
+            last_active=0.0,
+            now=1_000_000.0,
+            became_active=True,
+            player_count=0,
+            idle_shutdown_minutes=30.0,
+        )
+        self.assertEqual(last_active, 1_000_000.0)
+        self.assertFalse(should_stop)
 
 
 if __name__ == "__main__":

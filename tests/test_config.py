@@ -25,6 +25,8 @@ class ConfigFromEnvTests(unittest.TestCase):
         self.assertTrue(config.upnp_enabled)
         self.assertEqual(config.forward_port, 0)
         self.assertEqual(config.update_check_seconds, 1800.0)
+        self.assertFalse(config.idle_shutdown_enabled)
+        self.assertEqual(config.idle_shutdown_minutes, 30.0)
 
     def test_env_overrides_defaults(self):
         env = {
@@ -34,6 +36,8 @@ class ConfigFromEnvTests(unittest.TestCase):
             "SERVER_PORT": "25565",
             "ARCADE_FORWARD_PROTOCOL": "tcp",
             "ARCADE_UPDATE_CHECK_SECONDS": "300",
+            "ARCADE_IDLE_SHUTDOWN_ENABLED": "true",
+            "ARCADE_IDLE_SHUTDOWN_MINUTES": "15",
         }
         with patch.dict(os.environ, env, clear=True):
             config = AdapterConfig.from_env(
@@ -52,6 +56,8 @@ class ConfigFromEnvTests(unittest.TestCase):
         self.assertEqual(config.forward_port, 25565)
         self.assertEqual(config.forward_protocols, ("tcp",))
         self.assertEqual(config.update_check_seconds, 300.0)
+        self.assertTrue(config.idle_shutdown_enabled)
+        self.assertEqual(config.idle_shutdown_minutes, 15.0)
 
     def test_multiple_forward_protocols(self):
         env = {"ARCADE_FORWARD_PROTOCOL": "udp,tcp"}

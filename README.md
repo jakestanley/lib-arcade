@@ -54,6 +54,37 @@ invoking an image's own backup script) — generic Docker plumbing, same
 category as `do_start`/`do_stop`; anything more specific (RCON, a game's
 own HTTP API, etc.) belongs in the consumer repo, not here.
 
+`run_adapter` also takes `stats_fn`, a zero-arg callable returning a list
+of `{"label": ..., "value": ...}` dicts (e.g. player count/map/uptime
+pulled via RCON) — surfaced in both `/arcade/info` and the heartbeat's
+registration payload while the server is running. A `stats_fn` error is
+caught and logged rather than allowed to break the info endpoint or
+heartbeat loop; it just reports no stats for that tick.
+
+`player_count_fn` is a separate, narrower hook that powers opt-in
+idle-shutdown: a zero-arg callable returning the current connected player
+count as a non-negative `int`, or `None` if it couldn't be determined
+(e.g. the query failed or timed out). `None` is treated as "inconclusive,
+assume still active" — it's never read as zero players, so a transient
+query failure can never cause a wrongful stop of a server people are
+actually using. Set `ARCADE_IDLE_SHUTDOWN_ENABLED=true` and pass a
+`player_count_fn` to have the heartbeat loop stop the target container
+after `ARCADE_IDLE_SHUTDOWN_MINUTES` (default `30`) of a confirmed
+zero-player count while it's running; every stopped/unknown → running
+transition (i.e. every boot) resets the idle clock first, so startup/load
+time is never counted against it. This library has no way to count
+players itself — that's entirely game-specific (RCON, a REST API,
+whatever) — so idle-shutdown is off by default and, if enabled without a
+`player_count_fn`, logs a loud startup warning and never actually
+triggers rather than silently no-op'ing:
+
+```python
+def get_player_count() -> int | None:
+    ...  # query the game's own API/RCON; return None on failure
+
+run_adapter(config, player_count_fn=get_player_count)
+```
+
 Installed as a git dependency tracking `main` directly (no version
 pinning/bump mechanism — consumers rebuild periodically to pick up
 changes). Public repo, so this needs no credentials at all:

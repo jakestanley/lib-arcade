@@ -28,6 +28,8 @@ class AdapterConfig:
     forward_port: int
     forward_protocols: tuple[str, ...]
     update_check_seconds: float
+    idle_shutdown_enabled: bool
+    idle_shutdown_minutes: float
 
     @classmethod
     def from_env(
@@ -86,6 +88,18 @@ class AdapterConfig:
             # automatic -- see docker_control.do_update.
             update_check_seconds=float(
                 os.environ.get("ARCADE_UPDATE_CHECK_SECONDS", "1800")
+            ),
+            # Opt-in: stop the target container after N minutes of zero
+            # connected players. Off by default because this library has no
+            # way to count players itself -- it only fires at all when a
+            # consumer also passes run_adapter's player_count_fn. See
+            # server.py's idle-tracking logic.
+            idle_shutdown_enabled=os.environ.get(
+                "ARCADE_IDLE_SHUTDOWN_ENABLED", "false"
+            ).lower()
+            == "true",
+            idle_shutdown_minutes=float(
+                os.environ.get("ARCADE_IDLE_SHUTDOWN_MINUTES", "30")
             ),
         )
 

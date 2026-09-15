@@ -46,6 +46,12 @@ ActionSpec = dict[str, Any]
 
 StatsFn = Callable[[], "list[dict[str, str]]"]
 
+# Contract for the idle-shutdown player-count source: returns a
+# non-negative int (current connected player count) on success, or None if
+# the count couldn't be determined (query failed/timed out). None must
+# never be treated as "zero players" -- see _evaluate_idle_shutdown.
+PlayerCountFn = Callable[[], "int | None"]
+
 
 def _handler_accepts_body(handler: ActionHandler) -> bool:
     try:
@@ -198,12 +204,58 @@ def _safe_stats(stats_fn: StatsFn | None) -> list[dict[str, str]]:
         return []
 
 
+def _evaluate_idle_shutdown(
+    last_active: float,
+    now: float,
+    became_active: bool,
+    player_count: int | None,
+    idle_shutdown_minutes: float,
+) -> tuple[float, bool]:
+    """Pure idle-shutdown decision: given the current idle-timer state and
+    this iteration's inputs, return (new_last_active, should_stop). Pulled
+    out of the heartbeat loop so it's unit-testable without spinning up
+    threads or a real server, same as _merge_actions.
+
+    `became_active` is True on a stopped/unknown -> running transition --
+    always resets the timer, giving a fresh grace period after every boot
+    before idle-shutdown can possibly fire (so boot/loading time is never
+    counted against the idle clock).
+
+    `player_count` of None means "inconclusive" (the query failed or timed
+    out) and is treated the same as a nonzero count: reset the timer, so a
+    transient query failure can never cause a wrongful stop of a server
+    people are actually using. Only a confirmed 0 lets elapsed time
+    accumulate toward the threshold.
+    """
+    if became_active or player_count is None or player_count > 0:
+        return now, False
+    if now - last_active >= idle_shutdown_minutes * 60:
+        return now, True
+    return last_active, False
+
+
+def _safe_player_count(player_count_fn: PlayerCountFn | None) -> int | None:
+    """Never let a player-count query error (e.g. a game's admin API
+    unreachable mid-boot) propagate -- same broad-catch pattern as
+    _safe_stats. Returning None here (rather than letting the exception
+    escape) is what makes a query failure "inconclusive" instead of
+    accidentally reading as zero players."""
+    if player_count_fn is None:
+        return None
+    try:
+        return player_count_fn()
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad, see above
+        print(f"[adapter] player_count_fn failed: {exc}")
+        return None
+
+
 def _heartbeat_loop(
     config: AdapterConfig,
     ssl_context: ssl.SSLContext | None,
     actions: list[Union[str, dict]],
     stats_fn: StatsFn | None,
     update_state: dict[str, bool],
+    player_count_fn: PlayerCountFn | None = None,
 ) -> None:
     register_url = f"{config.arcade_base_url}/api/register"
     base_url = adapter_base_url(config)
@@ -212,6 +264,17 @@ def _heartbeat_loop(
     # heartbeat rather than reporting stale "no" until the first interval
     # elapses.
     last_update_check = 0.0
+    # Idle-shutdown timer state, written only by this loop -- same plain
+    # dict/no-lock pattern as update_state below (CPython's GIL makes a
+    # single key assignment atomic, and that's the only kind of write
+    # either dict does). Only touched at all when idle-shutdown is opted
+    # into with a player_count_fn -- see track_idle below -- so consumers
+    # who never pass one get zero added work.
+    idle_state: dict[str, Any] = {
+        "last_active": time.monotonic(),
+        "previous_status": None,
+    }
+    track_idle = config.idle_shutdown_enabled and player_count_fn is not None
     while True:
         status = current_status(config)
         # Renew the UPnP lease while running -- some routers expire mappings
@@ -219,6 +282,23 @@ def _heartbeat_loop(
         # rather than needing a manual stop/start.
         if status == "running":
             sync_port_forward(config, should_be_open=True)
+        if track_idle:
+            if status == "running":
+                became_active = idle_state["previous_status"] != "running"
+                count = _safe_player_count(player_count_fn)
+                idle_state["last_active"], should_stop = _evaluate_idle_shutdown(
+                    idle_state["last_active"],
+                    time.monotonic(),
+                    became_active,
+                    count,
+                    config.idle_shutdown_minutes,
+                )
+                if should_stop:
+                    print(
+                        f"[idle] stopping after {config.idle_shutdown_minutes}m with 0 players"
+                    )
+                    do_stop(config)
+            idle_state["previous_status"] = status
         now = time.monotonic()
         if now - last_update_check >= config.update_check_seconds:
             # Deliberately decoupled from heartbeat_seconds -- see
@@ -255,6 +335,7 @@ def run_adapter(
     config: AdapterConfig,
     extra_actions: dict[str, ActionHandler | ActionSpec] | None = None,
     stats_fn: StatsFn | None = None,
+    player_count_fn: PlayerCountFn | None = None,
 ) -> None:
     # Internal HTTPS uses the homelab's private CA (see homelab-standards'
     # internal-ca-trust.md) -- never disable verification instead.
@@ -278,7 +359,7 @@ def run_adapter(
 
     threading.Thread(
         target=_heartbeat_loop,
-        args=(config, ssl_context, actions, stats_fn, update_state),
+        args=(config, ssl_context, actions, stats_fn, update_state, player_count_fn),
         daemon=True,
     ).start()
 
@@ -292,4 +373,18 @@ def run_adapter(
         print(f"UPnP port-forwarding enabled for {protocols} {config.forward_port}")
     else:
         print("UPnP port-forwarding disabled (ARCADE_UPNP_ENABLED=false)")
+    if config.idle_shutdown_enabled and player_count_fn is not None:
+        print(
+            f"Idle-shutdown enabled: stopping after {config.idle_shutdown_minutes}m with 0 players"
+        )
+    elif config.idle_shutdown_enabled:
+        # Loud on purpose: a consumer that enables this without wiring up a
+        # player_count_fn would otherwise get a silent no-op with no
+        # indication anything is misconfigured.
+        print(
+            "WARNING: ARCADE_IDLE_SHUTDOWN_ENABLED=true but no player_count_fn "
+            "was passed to run_adapter() -- idle-shutdown will never trigger"
+        )
+    else:
+        print("Idle-shutdown disabled (ARCADE_IDLE_SHUTDOWN_ENABLED=false)")
     server.serve_forever()
